@@ -19,9 +19,12 @@ from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.chrome.service import Service
 from urllib.parse import urlparse
 from config import EMAIL, PASSWORD
+from dotenv import load_dotenv
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.chrome.options import Options as ChromeOptions
 
-USE_PREMIUM: bool = False  # Set to True if you want to login to Substack and convert paid for posts
-BASE_SUBSTACK_URL: str = "https://www.thefitzwilliam.com/"  # Substack you want to convert to markdown
+USE_PREMIUM: bool = True  # Set to True if you want to login to Substack and convert paid for posts
+BASE_SUBSTACK_URL: str = "https://newsletter.checkonchain.com/"  # Substack you want to convert to markdown
 BASE_MD_DIR: str = "substack_md_files"  # Name of the directory we'll save the .md essay files
 BASE_HTML_DIR: str = "substack_html_pages"  # Name of the directory we'll save the .html essay files
 HTML_TEMPLATE: str = "author_template.html"  # HTML template to use for the author page
@@ -366,76 +369,88 @@ class PremiumSubstackScraper(BaseSubstackScraper):
             base_substack_url: str,
             md_save_dir: str,
             html_save_dir: str,
-            headless: bool = False,
-            edge_path: str = '',
-            edge_driver_path: str = '',
+            headless: bool = True,  # Set headless to True by default
+            chrome_path: str = '',
+            chrome_driver_path: str = '',
             user_agent: str = ''
     ) -> None:
         super().__init__(base_substack_url, md_save_dir, html_save_dir)
 
-        options = EdgeOptions()
+        options = ChromeOptions()
         if headless:
             options.add_argument("--headless")
-        if edge_path:
-            options.binary_location = edge_path
+        if chrome_path:
+            options.binary_location = chrome_path
         if user_agent:
             options.add_argument(f'user-agent={user_agent}')  # Pass this if running headless and blocked by captcha
 
-        if edge_driver_path:
-            service = Service(executable_path=edge_driver_path)
+        if chrome_driver_path:
+            service = Service(executable_path=chrome_driver_path)
         else:
-            service = Service(EdgeChromiumDriverManager().install())
+            service = Service(ChromeDriverManager().install())
 
-        self.driver = webdriver.Edge(service=service, options=options)
-        self.login()
+        self.driver = webdriver.Chrome(service=service, options=options)
+        self.login_with_cookie()
 
-    def login(self) -> None:
+    def login_with_cookie(self) -> None:
         """
-        This method logs into Substack using Selenium
+        Loads SUBSTACK_COOKIE from .env and sets it in the Selenium driver for both substack.com and the newsletter domain.
         """
-        self.driver.get("https://substack.com/sign-in")
-        sleep(3)
-
-        signin_with_password = self.driver.find_element(
-            By.XPATH, "//a[@class='login-option substack-login__login-option']"
-        )
-        signin_with_password.click()
-        sleep(3)
-
-        # Email and password
-        email = self.driver.find_element(By.NAME, "email")
-        password = self.driver.find_element(By.NAME, "password")
-        email.send_keys(EMAIL)
-        password.send_keys(PASSWORD)
-
-        # Find the submit button and click it.
-        submit = self.driver.find_element(By.XPATH, "//*[@id=\"substack-login\"]/div[2]/div[2]/form/button")
-        submit.click()
-        sleep(30)  # Wait for the page to load
-
-        if self.is_login_failed():
-            raise Exception(
-                "Warning: Login unsuccessful. Please check your email and password, or your account status.\n"
-                "Use the non-premium scraper for the non-paid posts. \n"
-                "If running headless, run non-headlessly to see if blocked by Captcha."
-            )
-
-    def is_login_failed(self) -> bool:
-        """
-        Check for the presence of the 'error-container' to indicate a failed login attempt.
-        """
-        error_container = self.driver.find_elements(By.ID, 'error-container')
-        return len(error_container) > 0 and error_container[0].is_displayed()
+        load_dotenv()
+        cookie_str = os.getenv("SUBSTACK_COOKIE")
+        if not cookie_str:
+            raise Exception("SUBSTACK_COOKIE not found in .env file.")
+        cookie_parts = cookie_str.split("=", 1)
+        if len(cookie_parts) != 2:
+            raise Exception("SUBSTACK_COOKIE format invalid. Should be name=value.")
+        cookie_name, cookie_value = cookie_parts
+        # Set cookie on substack.com
+        self.driver.get("https://substack.com")
+        self.driver.add_cookie({
+            'name': cookie_name,
+            'value': cookie_value,
+            'domain': '.substack.com',
+            'path': '/',
+        })
+        # Set cookie on the newsletter domain
+        newsletter_domain = urlparse(self.base_substack_url).netloc
+        self.driver.get(f"https://{newsletter_domain}")
+        self.driver.add_cookie({
+            'name': cookie_name,
+            'value': cookie_value,
+            'domain': f'.{newsletter_domain}',
+            'path': '/',
+        })
 
     def get_url_soup(self, url: str) -> BeautifulSoup:
         """
-        Gets soup from URL using logged in selenium driver
+        Gets soup from URL using logged in selenium driver, always sets the cookie before loading.
         """
+        load_dotenv()
+        cookie_str = os.getenv("SUBSTACK_COOKIE")
+        if cookie_str:
+            cookie_parts = cookie_str.split("=", 1)
+            if len(cookie_parts) == 2:
+                cookie_name, cookie_value = cookie_parts
+                domain = urlparse(url).netloc
+                self.driver.get(f"https://{domain}")
+                self.driver.add_cookie({
+                    'name': cookie_name,
+                    'value': cookie_value,
+                    'domain': f'.{domain}',
+                    'path': '/',
+                })
         try:
             self.driver.get(url)
             return BeautifulSoup(self.driver.page_source, "html.parser")
         except Exception as e:
             raise ValueError(f"Error fetching page: {e}") from e
+
+    def login(self) -> None:
+        """
+        Deprecated: Login with email/password is no longer used.
+        """
+        raise NotImplementedError("Login with email/password is disabled. Use SUBSTACK_COOKIE in .env.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -466,16 +481,16 @@ def parse_args() -> argparse.Namespace:
         "Scraper.",
     )
     parser.add_argument(
-        "--edge-path",
+        "--chrome-path",
         type=str,
         default="",
-        help='Optional: The path to the Edge browser executable (i.e. "path_to_msedge.exe").',
+        help='Optional: The path to the Chrome browser executable (i.e. "path_to_chrome.exe").',
     )
     parser.add_argument(
-        "--edge-driver-path",
+        "--chrome-driver-path",
         type=str,
         default="",
-        help='Optional: The path to the Edge WebDriver executable (i.e. "path_to_msedgedriver.exe").',
+        help='Optional: The path to the Chrome WebDriver executable (i.e. "path_to_chromedriver.exe").',
     )
     parser.add_argument(
         "--user-agent",
@@ -508,7 +523,9 @@ def main():
                 args.url,
                 headless=args.headless,
                 md_save_dir=args.directory,
-                html_save_dir=args.html_directory
+                html_save_dir=args.html_directory,
+                chrome_path=args.chrome_path,
+                chrome_driver_path=args.chrome_driver_path
             )
         else:
             scraper = SubstackScraper(
@@ -524,8 +541,8 @@ def main():
                 base_substack_url=BASE_SUBSTACK_URL,
                 md_save_dir=args.directory,
                 html_save_dir=args.html_directory,
-                edge_path=args.edge_path,
-                edge_driver_path=args.edge_driver_path
+                chrome_path=args.chrome_path,
+                chrome_driver_path=args.chrome_driver_path
             )
         else:
             scraper = SubstackScraper(
