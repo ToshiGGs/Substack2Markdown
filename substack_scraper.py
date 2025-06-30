@@ -24,12 +24,12 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 
 USE_PREMIUM: bool = True  # Set to True if you want to login to Substack and convert paid for posts
-BASE_SUBSTACK_URL: str = "https://newsletter.checkonchain.com/"  # Substack you want to convert to markdown
+BASE_SUBSTACK_URL: str = "https://capitalwars.substack.com/"  # Substack you want to convert to markdown
 BASE_MD_DIR: str = "substack_md_files"  # Name of the directory we'll save the .md essay files
 BASE_HTML_DIR: str = "substack_html_pages"  # Name of the directory we'll save the .html essay files
 HTML_TEMPLATE: str = "author_template.html"  # HTML template to use for the author page
 JSON_DATA_DIR: str = "data"
-NUM_POSTS_TO_SCRAPE: int = 3  # Set to 0 if you want all posts
+NUM_POSTS_TO_SCRAPE: int = 0  # Set to 0 if you want all posts
 
 
 def extract_main_part(url: str) -> str:
@@ -369,7 +369,7 @@ class PremiumSubstackScraper(BaseSubstackScraper):
             base_substack_url: str,
             md_save_dir: str,
             html_save_dir: str,
-            headless: bool = True,  # Set headless to True by default
+            headless: bool = True,
             chrome_path: str = '',
             chrome_driver_path: str = '',
             user_agent: str = ''
@@ -400,57 +400,79 @@ class PremiumSubstackScraper(BaseSubstackScraper):
         cookie_str = os.getenv("SUBSTACK_COOKIE")
         if not cookie_str:
             raise Exception("SUBSTACK_COOKIE not found in .env file.")
-        cookie_parts = cookie_str.split("=", 1)
-        if len(cookie_parts) != 2:
-            raise Exception("SUBSTACK_COOKIE format invalid. Should be name=value.")
-        cookie_name, cookie_value = cookie_parts
-        # Set cookie on substack.com
+        
+        # Parse all cookies from the cookie string
+        cookies = []
+        for cookie_pair in cookie_str.split("; "):
+            if "=" in cookie_pair:
+                name, value = cookie_pair.split("=", 1)
+                cookies.append((name.strip(), value.strip()))
+        
+        if not cookies:
+            raise Exception("No valid cookies found in SUBSTACK_COOKIE.")
+        
+        # Set cookies on substack.com
         self.driver.get("https://substack.com")
-        self.driver.add_cookie({
-            'name': cookie_name,
-            'value': cookie_value,
-            'domain': '.substack.com',
-            'path': '/',
-        })
-        # Set cookie on the newsletter domain
+        for name, value in cookies:
+            try:
+                self.driver.add_cookie({
+                    'name': name,
+                    'value': value,
+                    'domain': '.substack.com',
+                    'path': '/',
+                })
+            except Exception as e:
+                print(f"Warning: Could not set cookie {name}: {e}")
+        
+        # Set cookies on the newsletter domain
         newsletter_domain = urlparse(self.base_substack_url).netloc
         self.driver.get(f"https://{newsletter_domain}")
-        self.driver.add_cookie({
-            'name': cookie_name,
-            'value': cookie_value,
-            'domain': f'.{newsletter_domain}',
-            'path': '/',
-        })
+        for name, value in cookies:
+            try:
+                self.driver.add_cookie({
+                    'name': name,
+                    'value': value,
+                    'domain': f'.{newsletter_domain}',
+                    'path': '/',
+                })
+            except Exception as e:
+                print(f"Warning: Could not set cookie {name}: {e}")
+        
+        print(f"Successfully set {len(cookies)} cookies")
 
     def get_url_soup(self, url: str) -> BeautifulSoup:
         """
-        Gets soup from URL using logged in selenium driver, always sets the cookie before loading.
+        Gets soup from URL using logged in selenium driver.
         """
-        load_dotenv()
-        cookie_str = os.getenv("SUBSTACK_COOKIE")
-        if cookie_str:
-            cookie_parts = cookie_str.split("=", 1)
-            if len(cookie_parts) == 2:
-                cookie_name, cookie_value = cookie_parts
-                domain = urlparse(url).netloc
-                self.driver.get(f"https://{domain}")
-                self.driver.add_cookie({
-                    'name': cookie_name,
-                    'value': cookie_value,
-                    'domain': f'.{domain}',
-                    'path': '/',
-                })
-        try:
-            self.driver.get(url)
-            return BeautifulSoup(self.driver.page_source, "html.parser")
-        except Exception as e:
-            raise ValueError(f"Error fetching page: {e}") from e
-
-    def login(self) -> None:
-        """
-        Deprecated: Login with email/password is no longer used.
-        """
-        raise NotImplementedError("Login with email/password is disabled. Use SUBSTACK_COOKIE in .env.")
+        max_retries = 3
+        base_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                self.driver.get(url)
+                # Add delay to avoid rate limiting
+                import time
+                time.sleep(base_delay)  # Wait 6 seconds between requests
+                page_source = self.driver.page_source
+                
+                # Check if we got a valid page (not a rate limit page)
+                if "too many requests" in page_source.lower() or len(page_source) < 1000:
+                    print(f"Rate limiting detected on attempt {attempt + 1}, waiting longer...")
+                    time.sleep(10)  # Wait 30 seconds extra
+                    continue
+                
+                return BeautifulSoup(page_source, "html.parser")
+                
+            except Exception as e:
+                if "NoneType" in str(e) and "text" in str(e):
+                    print(f"Rate limiting error on attempt {attempt + 1}, waiting longer...")
+                    import time
+                    time.sleep(10)  # Wait 30 seconds extra
+                    if attempt < max_retries - 1:
+                        continue
+                raise ValueError(f"Error fetching page: {e}") from e
+        
+        raise ValueError(f"Failed to fetch page after {max_retries} attempts")
 
 
 def parse_args() -> argparse.Namespace:
